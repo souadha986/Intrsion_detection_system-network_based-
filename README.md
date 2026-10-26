@@ -26,4 +26,4 @@ Logs structured JSON threat alerts (logs/alerts.jsonl) and escalates high-confid
 
 
 
-Distributed under the MIT License.
+
