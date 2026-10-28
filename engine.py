@@ -1,4 +1,3 @@
-
 import queue
 import threading
 import time
@@ -10,7 +9,7 @@ from alert_system import AlertSystem
 from anomaly_detector import AnomalyDetector
 from host_detector import HostDetector
 from packet_sources import make_capture
-from signatures import DDoSDetector, check_signatures
+from signatures import DDoSDetector, check_signatures, SEVERITY, SUPPRESSED_BY_DDOS
 from traffic_analysis import TrafficAnalyzer
 
 MIN_FLOW_PACKETS = 20      # a flow's rate is meaningless before this many packets
@@ -21,6 +20,7 @@ DISABLED_RULES = {'port_scan', 'port_scan_multi', 'dos_flood', 'syn_flood'}
 ML_BATCH = 256             # packets scored per model call
 ML_QUEUE = 5000            # if the model falls this far behind, new packets skip it
 ML_MIN_HITS = 5            # anomalous packets from one source within 10 s before an anomaly alert
+ML_PRUNE_EVERY = 1000
 
 
 def ml_features(analyzer, packet, features):
@@ -40,11 +40,26 @@ class DetectionEngine:
         self.hosts = HostDetector()
         self.use_anomaly = False              # off by default; the UI switch turns it on
         self._ml_hits = {}
+        self._ml_calls = 0
 
     def detect_threats(self, packet, features, ml_feats=None):
+        """All threats for one packet, most severe first.
+
+        check_signatures() is NOT first-match: every matching rule fires. Order and
+        suppression are decided here, explicitly.
+        """
+        now = float(packet.time)
+        target = packet[IP].dst
+
         threats = [t for t in check_signatures(ml_feats or features) if t['rule'] not in DISABLED_RULES]
         threats += self.hosts.check(packet)
-        threats += self.ddos.check(packet)
+        threats += self.ddos.check(packet)          # updates the DDoS incident state
+
+        # While a DDoS is active against this target, per-packet odd-flag alerts are just noise
+        if self.ddos.is_active(target, now):
+            threats = [t for t in threats if t['rule'] not in SUPPRESSED_BY_DDOS]
+
+        threats.sort(key=lambda t: SEVERITY.get(t['rule'], 50), reverse=True)
         return threats
 
     def confirm_anomaly(self, src):
@@ -54,7 +69,13 @@ class DetectionEngine:
         hits.append(now)
         while hits and now - hits[0] > 10:
             hits.popleft()
-        return len(hits) >= ML_MIN_HITS
+        confirmed = len(hits) >= ML_MIN_HITS
+
+        self._ml_calls += 1
+        if self._ml_calls % ML_PRUNE_EVERY == 0:      # keep memory bounded
+            for s in [s for s, h in self._ml_hits.items() if not h or now - h[-1] > 10]:
+                del self._ml_hits[s]
+        return confirmed
 
 
 class IntrusionDetectionSystem:
@@ -148,6 +169,8 @@ class IntrusionDetectionSystem:
     # ---- lane 1: signatures, on every packet ----
     def _process(self, packet):
         try:
+            if IP not in packet or TCP not in packet:
+                return
             if packet[TCP].sport in IGNORE_PORTS or packet[TCP].dport in IGNORE_PORTS:
                 return
             features = self.traffic_analyzer.analyze_packet(packet)
@@ -163,10 +186,10 @@ class IntrusionDetectionSystem:
                 try:
                     self._ml_queue.put_nowait((info, self.anomaly.row(ml_feats)))
                 except queue.Full:
-                    self.ml_skipped += 1       # model is behind: skip it, never slow the signatures
+                    with self._lock:
+                        self.ml_skipped += 1   # model is behind: skip it, never slow the signatures
         except Exception as e:                 # never let one bad packet kill the IDS
-            self._fail(e)
-            return
+            self._fail(e)                      # still counted below, so totals match reality
 
         with self._lock:
             self.total_packets += 1

@@ -1,9 +1,9 @@
-
 from collections import Counter, defaultdict, deque
 
 from scapy.all import IP, TCP
 
 ACK, RST, SYN = 0x10, 0x04, 0x02
+PRUNE_EVERY = 5000      # packets between clean-ups
 
 
 def _threat(rule):
@@ -33,6 +33,7 @@ class HostDetector:
         self._flood = defaultdict(deque)        # (src, dst) -> (time, dport, is_syn)
         self._flood_ports = defaultdict(Counter)
         self._flood_syns = defaultdict(int)
+        self._checks = 0
 
     def check(self, packet):
         if IP not in packet or TCP not in packet:
@@ -62,4 +63,18 @@ class HostDetector:
             self._flood_syns[key] -= s
         if len(q) > self.flood_packets and len(c) <= self.flood_max_ports:
             threats.append(_threat('syn_flood' if self._flood_syns[key] >= 0.8 * len(q) else 'dos_flood'))
+
+        self._checks += 1
+        if self._checks % PRUNE_EVERY == 0:
+            self._prune(now)
         return threats
+
+    def _prune(self, now):
+        """Forget sources/pairs that went quiet so memory stays bounded (spoofed floods)."""
+        for k in [k for k, q in self._probes.items() if not q or now - q[-1][0] > self.scan_window]:
+            del self._probes[k]
+            self._probe_ports.pop(k, None)
+        for k in [k for k, q in self._flood.items() if not q or now - q[-1][0] > self.flood_window]:
+            del self._flood[k]
+            self._flood_ports.pop(k, None)
+            self._flood_syns.pop(k, None)

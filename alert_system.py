@@ -19,6 +19,8 @@ SEVERITY = {
     'port_scan': 'medium', 'isolation_forest': 'medium',
 }
 
+MAX_COOLDOWN_KEYS = 10000     # spoofed floods create a new key per packet; cap the memory
+
 
 class AlertSystem:
     def __init__(self, log_path=settings.ALERT_LOG, cooldown=3.0, max_alerts=2000):
@@ -39,6 +41,9 @@ class AlertSystem:
             if now - self._last.get(key, 0) < self.cooldown:
                 return None
             self._last[key] = now
+            if len(self._last) > MAX_COOLDOWN_KEYS:      # drop expired cooldowns
+                cutoff = now - self.cooldown
+                self._last = {k: t for k, t in self._last.items() if t > cutoff}
             alert = {
                 'id': self._next_id,
                 'ts': now,

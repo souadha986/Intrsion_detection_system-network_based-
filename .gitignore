@@ -1,9 +1,6 @@
-# Ignorer le dataset lourd
-data/
-*.csv
-
-# Ignorer les logs et le cache Python
-logs/
 __pycache__/
+.pytest_cache/
 *.pyc
-tests/__pycache__/
+venv/
+.venv/
+*.jsonl
